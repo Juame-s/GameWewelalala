@@ -13,6 +13,9 @@ public class PlayerController : MonoBehaviour
     [Header("Run Settings")]
     [SerializeField] private float doubleTapWindow = 0.3f; // Max time between two W presses to trigger run
 
+    [Header("Interaction Settings")]
+    [SerializeField] private float interactRadius = 2f;
+
     [Header("Ground Check")]
     [SerializeField] private LayerMask groundLayer;
     [SerializeField] private float groundCheckDistance = 0.3f;
@@ -56,9 +59,25 @@ public class PlayerController : MonoBehaviour
         }
     }
 
+    private void OnDisable()
+    {
+        if (rb != null)
+        {
+            rb.linearVelocity = new Vector3(0, rb.linearVelocity.y, 0);
+        }
+        moveDirection = Vector3.zero;
+        isRunning = false;
+        UpdateAnimations();
+    }
+
     void Update()
     {
         HandleRunInput();
+
+        if (Input.GetKeyDown(KeyCode.E))
+        {
+            TryInteract();
+        }
 
         // Get input
         float horizontal = Input.GetAxisRaw("Horizontal");
@@ -98,6 +117,20 @@ public class PlayerController : MonoBehaviour
         }
 
         UpdateAnimations();
+    }
+
+    private void TryInteract()
+    {
+        Collider[] colliders = Physics.OverlapSphere(transform.position, interactRadius);
+        foreach (Collider col in colliders)
+        {
+            IInteractable interactable = col.GetComponent<IInteractable>();
+            if (interactable != null)
+            {
+                interactable.Interact();
+                break; // Only interact with one object
+            }
+        }
     }
 
     private void HandleRunInput()
