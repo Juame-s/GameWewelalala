@@ -27,6 +27,9 @@ public class CameraFollow : MonoBehaviour
     private float currentVerticalAngle = 20f;
     private float currentDistance; // Current distance from player (adjusted for collisions)
     
+    // Dialogue state — set by DialogueManager, blocks mouse rotation without disabling this component
+    public bool IsInDialogue { get; set; }
+    
     // Public property to get camera angle
     public float HorizontalAngle => currentHorizontalAngle;
     public float VerticalAngle => currentVerticalAngle;
@@ -63,7 +66,7 @@ public class CameraFollow : MonoBehaviour
         if (target == null) return;
         
         // Handle mouse input for camera rotation
-        if (enableMouseRotation)
+        if (enableMouseRotation && !IsInDialogue)
         {
             float currentSens = mouseSensitivity;
 

@@ -34,10 +34,15 @@ public class PlayerController : MonoBehaviour
     private bool isRunning;
     private float lastWPressTime = -999f;
 
+    // Dialogue state — set by DialogueManager, blocks input but keeps physics alive
+    public bool IsInDialogue { get; set; }
+
     [Header("Animation")]
     [SerializeField] private Animator animator;
 
     [Header("Mana / Stamina System")]
+    [Tooltip("Set true in the Inspector to start with mana already unlocked (useful for testing).")]
+    [SerializeField] private bool manaUnlocked = false;
     [SerializeField] private float maxMana = 100f;
     [SerializeField] private float manaChargeRate = 50f;
     [SerializeField] private float manaRunDrainRate = 10f; // Slower drain while running
@@ -46,6 +51,9 @@ public class PlayerController : MonoBehaviour
     [SerializeField] private float manaIdleDrainRate = 30f; // Fast drain when not doing anything
     [SerializeField] private float manaRunSpeedMultiplier = 1.5f;
     [SerializeField] private float manaChargeWalkSpeedMultiplier = 0.5f;
+
+    [Tooltip("Assign a ParticleSystem to emit while the player runs with mana.")]
+    [SerializeField] private ParticleSystem manaRunParticles;
 
     [Header("Mana UI Customization")]
     [SerializeField] private Vector2 manaBarSize = new Vector2(0.4f, 1.8f);
@@ -69,6 +77,29 @@ public class PlayerController : MonoBehaviour
     private bool isAttachedToWall = false;
     private Vector3 currentWallNormal;
     private Vector3 climbMoveDirection;
+
+    [Header("Fall System")]
+    [SerializeField] private float heavyFallThreshold = 2f;       // Seconds of freefall before locking wall climb
+    [SerializeField] private float recoveryDuration = 0.6f;       // Seconds player is stunned after hard landing
+    [Tooltip("Minimum fall time (seconds) needed to trigger the wall-grab drag.")]
+    [SerializeField] private float wallGrabDragFallThreshold = 0.4f;
+    [Tooltip("How long the player is dragged down after grabbing a wall mid-fall.")]
+    [SerializeField] private float wallGrabDragDuration = 0.5f;
+    [Tooltip("Downward speed during the wall-grab drag.")]
+    [SerializeField] private float wallGrabDragSpeed = 3f;
+    [Tooltip("Looping ParticleSystem that plays while the player is in heavy freefall.")]
+    [SerializeField] private ParticleSystem heavyFallParticles;
+    [Tooltip("One-shot ParticleSystem that fires when the player slams into the ground.")]
+    [SerializeField] private ParticleSystem heavyLandParticles;
+    [Tooltip("Looping ParticleSystem that plays while the player is being dragged down the wall.")]
+    [SerializeField] private ParticleSystem wallGrabDragParticles;
+
+    private float fallTimer = 0f;             // How long the player has been falling
+    private bool isHeavyFalling = false;      // True once fallTimer > heavyFallThreshold
+    private bool isRecovering = false;        // True right after a hard landing
+    private float recoveryTimer = 0f;
+    private bool isWallDragging = false;      // True while the wall-grab drag is active
+    private float wallDragTimer = 0f;
 
     private CanvasGroup manaCanvasGroup;
     private UnityEngine.UI.Image manaFill;
@@ -110,12 +141,25 @@ public class PlayerController : MonoBehaviour
         UpdateAnimations();
     }
 
+    /// <summary>Called by DialogueManager to freeze input while keeping physics running.</summary>
+    public void SetDialogueMode(bool inDialogue)
+    {
+        IsInDialogue = inDialogue;
+        if (inDialogue)
+        {
+            // Stop horizontal movement immediately but keep gravity
+            if (rb != null)
+                rb.linearVelocity = new Vector3(0f, rb.linearVelocity.y, 0f);
+            moveDirection = Vector3.zero;
+            isRunning = false;
+            UpdateAnimations();
+        }
+    }
+
     void Update()
     {
-        HandleRunInput();
-        HandleManaInput();
-
-        if (!isChargingMana && currentMana > 0f)
+        // Mana drain always runs, even during dialogue
+        if (manaUnlocked && !isChargingMana && currentMana > 0f)
         {
             if (isAttachedToWall)
             {
@@ -127,7 +171,7 @@ public class PlayerController : MonoBehaviour
                 else
                 {
                     currentMana -= manaClimbDrainRate * Time.deltaTime;
-                    if (currentMana <= 0) 
+                    if (currentMana <= 0)
                     {
                         currentMana = 0f;
                         isAttachedToWall = false;
@@ -148,9 +192,55 @@ public class PlayerController : MonoBehaviour
             }
         }
 
+        UpdateManaUI(); // Always update the bar so it reflects drain during dialogue too
+
+        // ── Fall tracking ──────────────────────────────────────────────────────
+        bool isFalling = !isGrounded && !isAttachedToWall && rb.linearVelocity.y < -0.1f;
+
+        if (isFalling)
+        {
+            fallTimer += Time.deltaTime;
+            if (fallTimer >= heavyFallThreshold)
+                isHeavyFalling = true;
+        }
+        else if (isGrounded)
+        {
+            if (isHeavyFalling)
+            {
+                // Hard landing — enter recovery
+                isRecovering = true;
+                recoveryTimer = recoveryDuration;
+                OnHeavyLanding();
+            }
+            fallTimer = 0f;
+            isHeavyFalling = false;
+        }
+
+        // Recovery countdown
+        if (isRecovering)
+        {
+            recoveryTimer -= Time.deltaTime;
+            if (recoveryTimer <= 0f)
+                isRecovering = false;
+        }
+
+        // ── Fall particles ─────────────────────────────────────────────────────
+        SetParticleEmitting(heavyFallParticles, isHeavyFalling);
+
+        if (IsInDialogue || isRecovering) return; // Inputs blocked during dialogue or recovery
+
+        HandleRunInput();
+        if (manaUnlocked) HandleManaInput();
+
+        // ── Mana Particles ─────────────────────────────────────────────────────
+        bool wantRunParticles = manaUnlocked && isRunning && currentMana > 0f;
+
+        SetParticleEmitting(manaRunParticles, wantRunParticles);
+
+        // Legacy trail (only active if no inspector particle assigned)
         if (runTrail != null)
         {
-            runTrail.emitting = (isRunning && currentMana > 0f);
+            runTrail.emitting = wantRunParticles && manaRunParticles == null;
         }
 
         if (Input.GetKeyDown(KeyCode.E))
@@ -219,13 +309,21 @@ public class PlayerController : MonoBehaviour
             {
                 bool doubleTapped = (Time.time - lastSpacePressTime <= doubleTapWindow);
                 
-                if (isNearWall && currentMana > 0f && doubleTapped && !isGrounded && !isChargingMana)
+                if (manaUnlocked && isNearWall && currentMana > 0f && doubleTapped && !isGrounded && !isChargingMana && !isHeavyFalling && !isRecovering)
                 {
                     // Attach to wall
                     isAttachedToWall = true;
                     rb.useGravity = false;
                     rb.linearVelocity = Vector3.zero;
                     lastSpacePressTime = -999f;
+
+                    // If falling long enough, trigger the drag-down penalty
+                    if (fallTimer >= wallGrabDragFallThreshold)
+                    {
+                        isWallDragging = true;
+                        wallDragTimer = wallGrabDragDuration;
+                    }
+                    fallTimer = 0f;
                 }
                 else
                 {
@@ -240,7 +338,6 @@ public class PlayerController : MonoBehaviour
         }
 
         UpdateAnimations();
-        UpdateManaUI();
     }
 
     private void TryInteract()
@@ -256,6 +353,33 @@ public class PlayerController : MonoBehaviour
             }
         }
     }
+
+    /// <summary>
+    /// Called by ManaUpgradeCollectable to permanently boost mana-related rates.
+    /// Pass 0 for any value you don't want to change.
+    /// </summary>
+    /// <param name="chargeRateBonus">Added to manaChargeRate.</param>
+    /// <param name="runDrainReduction">Subtracted from manaRunDrainRate (clamped to 0).</param>
+    /// <param name="climbDrainReduction">Subtracted from manaClimbDrainRate (clamped to 0).</param>
+    public void ApplyManaUpgrade(float chargeRateBonus, float runDrainReduction, float climbDrainReduction)
+    {
+        manaChargeRate   = Mathf.Max(0f, manaChargeRate   + chargeRateBonus);
+        manaRunDrainRate  = Mathf.Max(0f, manaRunDrainRate  - runDrainReduction);
+        manaClimbDrainRate = Mathf.Max(0f, manaClimbDrainRate - climbDrainReduction);
+    }
+
+    /// <summary>
+    /// Called by ManaUnlockCollectable. Enables the entire mana system for this player.
+    /// </summary>
+    public void UnlockMana()
+    {
+        if (manaUnlocked) return;
+        manaUnlocked = true;
+        Debug.Log("[Mana] Mana system unlocked!");
+    }
+
+    /// <summary>Returns whether the mana system has been unlocked.</summary>
+    public bool IsManaUnlocked => manaUnlocked;
 
     private void HandleRunInput()
     {
@@ -330,7 +454,29 @@ public class PlayerController : MonoBehaviour
 
         if (isAttachedToWall)
         {
-            rb.linearVelocity = climbMoveDirection * climbSpeed - currentWallNormal * 1f;
+            if (isWallDragging)
+            {
+                // Drag the player downward — they can't freely climb yet
+                wallDragTimer -= Time.fixedDeltaTime;
+                if (wallDragTimer <= 0f)
+                    isWallDragging = false;
+
+                // Slide down while pressing into wall
+                rb.linearVelocity = new Vector3(0f, -wallGrabDragSpeed, 0f) - currentWallNormal * 1f;
+            }
+            else
+            {
+                rb.linearVelocity = climbMoveDirection * climbSpeed - currentWallNormal * 1f;
+            }
+
+            SetParticleEmitting(wallGrabDragParticles, isWallDragging);
+            return;
+        }
+
+        // Freeze movement completely during landing recovery
+        if (isRecovering)
+        {
+            rb.linearVelocity = new Vector3(0f, rb.linearVelocity.y, 0f);
             return;
         }
 
@@ -343,7 +489,7 @@ public class PlayerController : MonoBehaviour
         else if (isRunning)
         {
             currentSpeed = runSpeed;
-            if (currentMana > 0f)
+            if (manaUnlocked && currentMana > 0f)
             {
                 currentSpeed = runSpeed * manaRunSpeedMultiplier;
             }
@@ -365,6 +511,14 @@ public class PlayerController : MonoBehaviour
         {
             jumpRequested = false;
         }
+    }
+
+    /// <summary>Starts or stops a ParticleSystem without calling Play/Stop every frame.</summary>
+    private void SetParticleEmitting(ParticleSystem ps, bool shouldEmit)
+    {
+        if (ps == null) return;
+        if (shouldEmit && !ps.isEmitting) ps.Play();
+        else if (!shouldEmit && ps.isEmitting) ps.Stop(false, ParticleSystemStopBehavior.StopEmitting);
     }
 
     void OnCollisionStay(Collision collision)
@@ -407,7 +561,7 @@ public class PlayerController : MonoBehaviour
             canChargeMana = true;
         }
 
-        if (Input.GetKey(KeyCode.G) && canChargeMana && !isRunning)
+        if (Input.GetKey(KeyCode.G) && canChargeMana && !isRunning && !isAttachedToWall)
         {
             isChargingMana = true;
 
@@ -572,5 +726,16 @@ public class PlayerController : MonoBehaviour
 
         Gizmos.color = Color.red;
         Gizmos.DrawRay(frontPosition, -transform.forward * 0.5f);
+    }
+
+
+    private void OnHeavyLanding()
+    {
+        // Fire the one-shot landing burst
+        if (heavyLandParticles != null) heavyLandParticles.Play();
+
+        // TODO: animator.SetTrigger("HeavyLand");
+        // TODO: CameraShake.Instance.Shake(0.3f, 0.15f);
+        Debug.Log("[PlayerController] Heavy landing detected – recovery started.");
     }
 }

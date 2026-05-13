@@ -76,14 +76,14 @@ public class DialogueManager : MonoBehaviour
         currentNode = startNode;
         dialoguePanel.SetActive(true);
         
-        // Disable player movement
+        // Block player input but keep physics running
         if (playerController != null)
-            playerController.enabled = false;
+            playerController.SetDialogueMode(true);
 
-        // Disable camera rotation and unlock mouse
+        // Block camera rotation but keep camera following the player
         CameraFollow camFollow = Camera.main.GetComponent<CameraFollow>();
         if (camFollow != null)
-            camFollow.enabled = false;
+            camFollow.IsInDialogue = true;
 
         Cursor.lockState = CursorLockMode.None;
         Cursor.visible = true;
@@ -263,12 +263,14 @@ public class DialogueManager : MonoBehaviour
         dialoguePanel.SetActive(false);
         currentNode = null;
 
+        // Re-enable player input
         if (playerController != null)
-            playerController.enabled = true;
+            playerController.SetDialogueMode(false);
 
+        // Re-enable camera rotation
         CameraFollow camFollow = Camera.main.GetComponent<CameraFollow>();
         if (camFollow != null)
-            camFollow.enabled = true;
+            camFollow.IsInDialogue = false;
 
         Cursor.lockState = CursorLockMode.Locked;
         Cursor.visible = false;
