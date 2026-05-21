@@ -662,8 +662,8 @@ public class PlayerController : MonoBehaviour
             return;
         }
 
-        // Freeze movement completely during landing recovery
-        if (isRecovering)
+        // Freeze movement completely during landing recovery or dialogue
+        if (isRecovering || IsInDialogue)
         {
             rb.linearVelocity = new Vector3(0f, rb.linearVelocity.y, 0f);
             return;

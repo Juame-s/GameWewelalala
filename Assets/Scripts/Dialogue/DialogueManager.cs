@@ -26,6 +26,12 @@ public class DialogueManager : MonoBehaviour
     public float shakeAmount = 2f;
     public float shakeSpeed = 10f;
 
+    [Header("Billboard & Radial Settings")]
+    public float radialMenuRadius = 150f;
+    public Vector3 billboardOffset = new Vector3(0, 2f, 0);
+
+    private Transform currentNPCTransform;
+
     private DialogueNode currentNode;
     private Coroutine typingCoroutine;
     private bool isTyping;
@@ -59,6 +65,15 @@ public class DialogueManager : MonoBehaviour
     {
         if (dialoguePanel.activeSelf)
         {
+            // Billboard tracking
+            if (currentNPCTransform != null && Camera.main != null)
+            {
+                Vector3 screenPos = Camera.main.WorldToScreenPoint(currentNPCTransform.position + billboardOffset);
+                
+                // If it's behind the camera, you might want to hide it, but for simplicity we just set position
+                dialoguePanel.transform.position = screenPos;
+            }
+
             // Skip typing effect (adding a tiny 0.1s delay so the interact button doesn't instantly skip)
             if (isTyping && Time.time - dialogueStartTime > 0.1f && (Input.GetKeyDown(KeyCode.Space) || Input.GetMouseButtonDown(0) || Input.GetKeyDown(KeyCode.E)))
             {
@@ -70,11 +85,12 @@ public class DialogueManager : MonoBehaviour
         }
     }
 
-    public void StartDialogue(DialogueNode startNode)
+    public void StartDialogue(DialogueNode startNode, Transform npcTransform = null)
     {
         if (startNode == null) return;
 
         currentNode = startNode;
+        currentNPCTransform = npcTransform;
         dialoguePanel.SetActive(true);
         
         // Block player input but keep physics running
@@ -214,25 +230,59 @@ public class DialogueManager : MonoBehaviour
 
     private void ShowOptions()
     {
+        List<GameObject> spawnedButtons = new List<GameObject>();
+
         if (currentNode.options == null || currentNode.options.Count == 0)
         {
-            CreateOptionButton("End Dialogue", null, null);
+            spawnedButtons.Add(CreateOptionButton("End Dialogue", null, null));
         }
         else
         {
             foreach (var option in currentNode.options)
             {
-                CreateOptionButton(option.optionText, option.nextNode, option.onOptionSelected);
+                spawnedButtons.Add(CreateOptionButton(option.optionText, option.nextNode, option.onOptionSelected));
             }
+        }
+
+        // Radial layout logic
+        int count = spawnedButtons.Count;
+        for (int i = 0; i < count; i++)
+        {
+            // Angle mapping: 
+            // We want the options spread evenly.
+            // If there's only 1 option, just put it in the center or right.
+            float angleDeg = 0;
+            if (count > 1)
+            {
+                // Start right, go counter-clockwise. You can adjust the offset (+90) if you want it to start at top.
+                angleDeg = i * (360f / count); 
+            }
+            else
+            {
+                // 1 option, put it below the dialogue box maybe? Or right in the middle
+                angleDeg = 270f; 
+            }
+
+            float angleRad = angleDeg * Mathf.Deg2Rad;
+            Vector3 targetPos = new Vector3(Mathf.Cos(angleRad) * radialMenuRadius, Mathf.Sin(angleRad) * radialMenuRadius, 0);
+
+            GameObject btn = spawnedButtons[i];
+            RadialMenuOption radialOpt = btn.GetComponent<RadialMenuOption>();
+            if (radialOpt == null)
+            {
+                radialOpt = btn.AddComponent<RadialMenuOption>();
+            }
+
+            // Stagger animation slightly
+            radialOpt.AnimateAppearance(targetPos, i * 0.05f);
         }
     }
 
-    private void CreateOptionButton(string text, DialogueNode nextNode, UnityEngine.Events.UnityEvent onSelected)
+    private GameObject CreateOptionButton(string text, DialogueNode nextNode, UnityEngine.Events.UnityEvent onSelected)
     {
         GameObject buttonObj = Instantiate(optionButtonPrefab);
         buttonObj.transform.SetParent(optionsContainer, false);
-        buttonObj.transform.localScale = Vector3.one;
-        buttonObj.transform.localPosition = Vector3.zero;
+        // Local scale and position will be handled by RadialMenuOption animation
 
         buttonObj.GetComponentInChildren<TextMeshProUGUI>().text = text;
         
@@ -250,6 +300,8 @@ public class DialogueManager : MonoBehaviour
                 EndDialogue();
             }
         });
+
+        return buttonObj;
     }
 
     private void ClearOptions()
@@ -264,6 +316,7 @@ public class DialogueManager : MonoBehaviour
     {
         dialoguePanel.SetActive(false);
         currentNode = null;
+        currentNPCTransform = null;
 
         // Re-enable player input
         if (playerController != null)

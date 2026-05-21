@@ -13,7 +13,7 @@ public class NPCInteractable : MonoBehaviour, IInteractable
         {
             if (DialogueManager.Instance != null)
             {
-                DialogueManager.Instance.StartDialogue(startingNode);
+                DialogueManager.Instance.StartDialogue(startingNode, this.transform);
             }
             else
             {
