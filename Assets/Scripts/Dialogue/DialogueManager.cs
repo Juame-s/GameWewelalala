@@ -30,6 +30,7 @@ public class DialogueManager : MonoBehaviour
     private Coroutine typingCoroutine;
     private bool isTyping;
     private bool skipRequested;
+    private float dialogueStartTime;
     
     private PlayerController playerController;
 
@@ -58,8 +59,8 @@ public class DialogueManager : MonoBehaviour
     {
         if (dialoguePanel.activeSelf)
         {
-            // Skip typing effect
-            if (isTyping && (Input.GetKeyDown(KeyCode.Space) || Input.GetMouseButtonDown(0) || Input.GetKeyDown(KeyCode.E)))
+            // Skip typing effect (adding a tiny 0.1s delay so the interact button doesn't instantly skip)
+            if (isTyping && Time.time - dialogueStartTime > 0.1f && (Input.GetKeyDown(KeyCode.Space) || Input.GetMouseButtonDown(0) || Input.GetKeyDown(KeyCode.E)))
             {
                 skipRequested = true;
             }
@@ -94,6 +95,7 @@ public class DialogueManager : MonoBehaviour
     private void DisplayNode(DialogueNode node)
     {
         currentNode = node;
+        dialogueStartTime = Time.time;
         ClearOptions();
         speakerNameText.text = node.speakerName;
         skipRequested = false;

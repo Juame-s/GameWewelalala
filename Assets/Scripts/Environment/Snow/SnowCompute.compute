@@ -1,0 +1,46 @@
+#pragma kernel FadeSnow
+#pragma kernel DrawSnow
+
+RWTexture2D<float> SnowMap;
+float deltaTime;
+float fadeSpeed;
+
+float2 drawWorldPos;
+float drawRadius;
+float drawAmount;
+float mapWorldSize;
+
+[numthreads(8,8,1)]
+void FadeSnow (uint3 id : SV_DispatchThreadID)
+{
+    float current = SnowMap[id.xy];
+    if (current > 0)
+    {
+        current -= fadeSpeed * deltaTime;
+        if (current < 0) current = 0;
+        SnowMap[id.xy] = current;
+    }
+}
+
+[numthreads(8,8,1)]
+void DrawSnow (uint3 id : SV_DispatchThreadID)
+{
+    uint width, height;
+    SnowMap.GetDimensions(width, height);
+    
+    // Calculate world position for this pixel
+    float2 uv = float2((float)id.x / width, (float)id.y / height);
+    float2 worldPos = (uv - 0.5) * mapWorldSize;
+    
+    float dist = distance(worldPos, drawWorldPos);
+    if (dist < drawRadius)
+    {
+        float normalizedDist = dist / drawRadius;
+        // Use smoothstep for steeper, more defined crater walls instead of a soft linear blur
+        float intensity = smoothstep(1.0, 0.0, normalizedDist) * drawAmount;
+        float current = SnowMap[id.xy];
+        current += intensity;
+        if (current > 1.0) current = 1.0;
+        SnowMap[id.xy] = current;
+    }
+}

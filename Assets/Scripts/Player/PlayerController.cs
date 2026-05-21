@@ -55,6 +55,15 @@ public class PlayerController : MonoBehaviour
     [Tooltip("Assign a ParticleSystem to emit while the player runs with mana.")]
     [SerializeField] private ParticleSystem manaRunParticles;
 
+    [Header("Mana Sounds")]
+    [Tooltip("Plays at a regular interval while the player is actively charging mana.")]
+    [SerializeField] private AudioClip manaChargeTickClip;
+    [Tooltip("How often (in seconds) the tick sound fires while charging.")]
+    [SerializeField] private float manaChargeTickInterval = 0.5f;
+    [Tooltip("Plays once when the mana bar reaches 100%.")]
+    [SerializeField] private AudioClip manaChargeFullClip;
+    [SerializeField] [Range(0f, 1f)] private float manaSoundVolume = 0.7f;
+
     [Header("Mana UI Customization")]
     [SerializeField] private Vector2 manaBarSize = new Vector2(0.4f, 1.8f);
     [SerializeField] private Vector3 manaBarOffset = new Vector3(1f, 1.5f, 0f);
@@ -72,11 +81,34 @@ public class PlayerController : MonoBehaviour
     private bool canChargeMana = true;
     private bool chargeOverridesRun = false;
     private float targetManaAlpha = 0f;
+    private float chargeTickTimer = 0f;      // Accumulates time while charging for tick sound
     private float lastSpacePressTime = -999f;
     private bool isNearWall = false;
     private bool isAttachedToWall = false;
     private Vector3 currentWallNormal;
     private Vector3 climbMoveDirection;
+
+    [Header("Wall Jump Skill")]
+    [SerializeField] private bool wallJumpUnlocked = false;
+    [SerializeField] private float wallJumpForce = 15f;
+    [SerializeField] private float wallJumpUpForce = 10f;
+    [SerializeField] private float wallJumpControlLockTime = 0.3f;
+    [Tooltip("How long (seconds) the player stays attached to a wall after losing contact, to bridge corner gaps.")]
+    [SerializeField] private float wallCornerGraceDuration = 0.12f;
+    [Tooltip("How long mana drain is paused after performing a wall jump.")]
+    [SerializeField] private float wallJumpManaPauseDuration = 1f;
+    private bool isWallJumping = false;
+    private float wallJumpTimer = 0f;
+    private float wallCornerGraceTimer = 0f;
+    private float wallJumpManaPauseTimer = 0f;
+
+    [Header("Snow Interaction")]
+    [SerializeField] private float snowTrailRadius = 0.5f;
+    [SerializeField] private float baseSnowMeltRadius = 3f;
+    [SerializeField] private float snowInteractionAmount = 5f; // Intensity of melting
+    private float bonusSnowMeltRadius = 0f;
+
+
 
     [Header("Fall System")]
     [SerializeField] private float heavyFallThreshold = 2f;       // Seconds of freefall before locking wall climb
@@ -101,9 +133,45 @@ public class PlayerController : MonoBehaviour
     private bool isWallDragging = false;      // True while the wall-grab drag is active
     private float wallDragTimer = 0f;
 
+    [Header("Rope Walking")]
+    [SerializeField] private Vector2 ropeBarSize = new Vector2(4f, 0.4f);
+    [SerializeField] private Vector3 ropeBarOffset = new Vector3(0f, 2.5f, 0f);
+    [SerializeField] private float ropeMoveSpeed = 4f; 
+    [SerializeField] private float ropeBalanceControlPower = 1500f; // Increased so the notch moves very fast when commanded
+    [SerializeField] private float ropeMaxTiltAngle = 40f;
+    [SerializeField] private float maxRopeEntryDistance = 3f;
+    
+    [Header("Ziplining")]
+    [SerializeField] private float ziplineSpeed = 20f;
+    [SerializeField] private float minZiplineSlope = 2f;
+    [SerializeField] private float ziplineHangOffset = 1.2f;
+    
+    [Header("Rope UI Customization")]
+    [SerializeField] private Sprite ropeBarBgSprite;
+    [SerializeField] private Sprite ropeCenterSprite;
+    [SerializeField] private Sprite ropeNotchSprite;
+    [SerializeField] private Color ropeBarBgColor = new Color(0.1f, 0.1f, 0.1f, 0.8f);
+    [SerializeField] private Color ropeCenterColor = new Color(0f, 1f, 0f, 0.3f);
+    [SerializeField] private Color ropeNotchColorSafe = Color.white;
+    [SerializeField] private Color ropeNotchColorDanger = Color.red;
+    [SerializeField] private float ropeNotchWidth = 0.2f;
+    [SerializeField] private float ropeCenterWidth = 0.4f;
+    
+    public bool IsRopeWalking { get; private set; }
+    public bool IsZiplining { get; private set; }
+    private RopeWalkable currentRope;
+    private float ropeProgress = 0f;
+    private Vector3 currentRopeDir;
+    private float balanceValue = 0f;
+    private float balanceVelocity = 0f;
+    private CanvasGroup ropeCanvasGroup;
+    private RectTransform ropeNotch;
+    private float targetRopeUIAlpha = 0f;
+
     private CanvasGroup manaCanvasGroup;
     private UnityEngine.UI.Image manaFill;
     private TrailRenderer runTrail;
+    private AudioSource audioSource;
 
     void Start()
     {
@@ -127,7 +195,14 @@ public class PlayerController : MonoBehaviour
         }
 
         CreateManaUI();
+        CreateRopeUI();
         CreateTrailRenderer();
+
+        // Grab or create an AudioSource for mana sounds
+        audioSource = GetComponent<AudioSource>();
+        if (audioSource == null) audioSource = gameObject.AddComponent<AudioSource>();
+        audioSource.playOnAwake = false;
+        audioSource.spatialBlend = 0f; // 2D sound
     }
 
     private void OnDisable()
@@ -158,12 +233,16 @@ public class PlayerController : MonoBehaviour
 
     void Update()
     {
+        // Tick wall jump mana pause timer
+        if (wallJumpManaPauseTimer > 0f)
+            wallJumpManaPauseTimer -= Time.deltaTime;
+
         // Mana drain always runs, even during dialogue
-        if (manaUnlocked && !isChargingMana && currentMana > 0f)
+        if (manaUnlocked && !isChargingMana && currentMana > 0f && wallJumpManaPauseTimer <= 0f)
         {
             if (isAttachedToWall)
             {
-                if (!isNearWall)
+                if (!isNearWall && wallCornerGraceTimer <= 0f)
                 {
                     isAttachedToWall = false;
                     rb.useGravity = true;
@@ -193,6 +272,21 @@ public class PlayerController : MonoBehaviour
         }
 
         UpdateManaUI(); // Always update the bar so it reflects drain during dialogue too
+        UpdateRopeUI();
+
+        if (IsRopeWalking)
+        {
+            HandleRopeWalking();
+            UpdateAnimations();
+            return;
+        }
+        
+        if (IsZiplining)
+        {
+            HandleZiplining();
+            UpdateAnimations();
+            return;
+        }
 
         // ── Fall tracking ──────────────────────────────────────────────────────
         bool isFalling = !isGrounded && !isAttachedToWall && rb.linearVelocity.y < -0.1f;
@@ -205,6 +299,8 @@ public class PlayerController : MonoBehaviour
         }
         else if (isGrounded)
         {
+            isWallJumping = false;
+            wallJumpTimer = 0f;
             if (isHeavyFalling)
             {
                 // Hard landing — enter recovery
@@ -229,6 +325,25 @@ public class PlayerController : MonoBehaviour
 
         if (IsInDialogue || isRecovering) return; // Inputs blocked during dialogue or recovery
 
+        if (isWallJumping && isNearWall && manaUnlocked && currentMana > 0f && !isGrounded && !isHeavyFalling && !isRecovering)
+        {
+            if (wallJumpTimer < wallJumpControlLockTime - 0.1f)
+            {
+                isAttachedToWall = true;
+                rb.useGravity = false;
+                rb.linearVelocity = Vector3.zero;
+                isWallJumping = false;
+                wallJumpTimer = 0f;
+
+                if (fallTimer >= wallGrabDragFallThreshold)
+                {
+                    isWallDragging = true;
+                    wallDragTimer = wallGrabDragDuration;
+                }
+                fallTimer = 0f;
+            }
+        }
+
         HandleRunInput();
         if (manaUnlocked) HandleManaInput();
 
@@ -236,6 +351,23 @@ public class PlayerController : MonoBehaviour
         bool wantRunParticles = manaUnlocked && isRunning && currentMana > 0f;
 
         SetParticleEmitting(manaRunParticles, wantRunParticles);
+
+        if (VolumetricSnowManager.Instance != null)
+        {
+            if (isGrounded && !isAttachedToWall)
+            {
+                // Leave a trail where walking
+                VolumetricSnowManager.Instance.AddImpulse(transform.position, snowTrailRadius, snowInteractionAmount * Time.deltaTime);
+            }
+            if (isChargingMana)
+            {
+                // Melt area while charging
+                float currentMeltRadius = baseSnowMeltRadius + bonusSnowMeltRadius;
+                VolumetricSnowManager.Instance.AddImpulse(transform.position, currentMeltRadius, snowInteractionAmount * 2f * Time.deltaTime);
+            }
+        }
+
+
 
         // Legacy trail (only active if no inspector particle assigned)
         if (runTrail != null)
@@ -294,6 +426,20 @@ public class PlayerController : MonoBehaviour
             }
         }
 
+        // Wall Jump input
+        if (isAttachedToWall && wallJumpUnlocked && Input.GetKeyDown(KeyCode.Q) && !isWallDragging && currentMana >= 10f)
+        {
+            currentMana -= 10f;
+            isAttachedToWall = false;
+            rb.useGravity = true;
+            isWallJumping = true;
+            wallJumpTimer = wallJumpControlLockTime;
+            wallJumpManaPauseTimer = wallJumpManaPauseDuration; // Pause mana drain for a moment
+
+            transform.rotation = Quaternion.LookRotation(currentWallNormal);
+            rb.linearVelocity = currentWallNormal * wallJumpForce + Vector3.up * wallJumpUpForce;
+        }
+
         // Jump and Wall climb input
         if (Input.GetKeyDown(KeyCode.Space))
         {
@@ -308,6 +454,15 @@ public class PlayerController : MonoBehaviour
             else
             {
                 bool doubleTapped = (Time.time - lastSpacePressTime <= doubleTapWindow);
+                
+                if (doubleTapped && !isGrounded && !isChargingMana && !isHeavyFalling && !isRecovering)
+                {
+                    if (TryStartZipline())
+                    {
+                        lastSpacePressTime = -999f;
+                        return;
+                    }
+                }
                 
                 if (manaUnlocked && isNearWall && currentMana > 0f && doubleTapped && !isGrounded && !isChargingMana && !isHeavyFalling && !isRecovering)
                 {
@@ -361,11 +516,12 @@ public class PlayerController : MonoBehaviour
     /// <param name="chargeRateBonus">Added to manaChargeRate.</param>
     /// <param name="runDrainReduction">Subtracted from manaRunDrainRate (clamped to 0).</param>
     /// <param name="climbDrainReduction">Subtracted from manaClimbDrainRate (clamped to 0).</param>
-    public void ApplyManaUpgrade(float chargeRateBonus, float runDrainReduction, float climbDrainReduction)
+    public void ApplyManaUpgrade(float chargeRateBonus, float runDrainReduction, float climbDrainReduction, float meltRadiusBonus = 0f)
     {
         manaChargeRate   = Mathf.Max(0f, manaChargeRate   + chargeRateBonus);
         manaRunDrainRate  = Mathf.Max(0f, manaRunDrainRate  - runDrainReduction);
         manaClimbDrainRate = Mathf.Max(0f, manaClimbDrainRate - climbDrainReduction);
+        bonusSnowMeltRadius += meltRadiusBonus;
     }
 
     /// <summary>
@@ -380,6 +536,13 @@ public class PlayerController : MonoBehaviour
 
     /// <summary>Returns whether the mana system has been unlocked.</summary>
     public bool IsManaUnlocked => manaUnlocked;
+
+    public void UnlockWallJump()
+    {
+        wallJumpUnlocked = true;
+    }
+
+    public bool IsWallJumpUnlocked => wallJumpUnlocked;
 
     private void HandleRunInput()
     {
@@ -439,11 +602,37 @@ public class PlayerController : MonoBehaviour
         animator.SetBool("IsRunning", isMoving && isRunning);
         animator.SetBool("IsGrounded", isGrounded);
         animator.SetFloat("VerticalVelocity", rb.linearVelocity.y);
+        
+        // Optional Zipline pose:
+        // if (IsZiplining) animator.Play("ZiplinePose"); 
     }
 
     void FixedUpdate()
     {
         isNearWall = false;
+
+        // Tick down the corner grace timer
+        if (wallCornerGraceTimer > 0f)
+            wallCornerGraceTimer -= Time.fixedDeltaTime;
+
+        // While attached, probe ahead with a raycast to find the next wall face at corners
+        if (isAttachedToWall && climbMoveDirection.magnitude > 0.1f)
+        {
+            float probeRadius = capsuleCollider != null ? capsuleCollider.radius + 0.1f : 0.4f;
+            Vector3 probeDir = new Vector3(climbMoveDirection.x, 0f, climbMoveDirection.z).normalized;
+            if (probeDir.magnitude > 0.05f &&
+                Physics.SphereCast(transform.position, probeRadius, probeDir,
+                    out RaycastHit cornerHit, 0.6f, groundLayer))
+            {
+                float hitNormalY = cornerHit.normal.y;
+                if (Mathf.Abs(hitNormalY) < 0.5f)
+                {
+                    // Found an adjacent wall face — switch to it seamlessly
+                    isNearWall = true;
+                    currentWallNormal = cornerHit.normal;
+                }
+            }
+        }
 
         // Ground check
         float castDistance = 0.1f;
@@ -480,23 +669,30 @@ public class PlayerController : MonoBehaviour
             return;
         }
 
-        // Move player (use run speed if running)
-        float currentSpeed = moveSpeed;
-        if (isChargingMana)
+        if (wallJumpTimer > 0f)
         {
-            currentSpeed = moveSpeed * manaChargeWalkSpeedMultiplier;
+            wallJumpTimer -= Time.fixedDeltaTime;
         }
-        else if (isRunning)
+        else
         {
-            currentSpeed = runSpeed;
-            if (manaUnlocked && currentMana > 0f)
+            // Move player (use run speed if running)
+            float currentSpeed = moveSpeed;
+            if (isChargingMana)
             {
-                currentSpeed = runSpeed * manaRunSpeedMultiplier;
+                currentSpeed = moveSpeed * manaChargeWalkSpeedMultiplier;
             }
+            else if (isRunning)
+            {
+                currentSpeed = runSpeed;
+                if (manaUnlocked && currentMana > 0f)
+                {
+                    currentSpeed = runSpeed * manaRunSpeedMultiplier;
+                }
+            }
+            Vector3 velocity = moveDirection * currentSpeed;
+            velocity.y = rb.linearVelocity.y;
+            rb.linearVelocity = velocity;
         }
-        Vector3 velocity = moveDirection * currentSpeed;
-        velocity.y = rb.linearVelocity.y;
-        rb.linearVelocity = velocity;
 
         // Apply jump
         if (jumpRequested && isGrounded)
@@ -521,6 +717,26 @@ public class PlayerController : MonoBehaviour
         else if (!shouldEmit && ps.isEmitting) ps.Stop(false, ParticleSystemStopBehavior.StopEmitting);
     }
 
+    void OnCollisionEnter(Collision collision)
+    {
+        foreach (ContactPoint contact in collision.contacts)
+        {
+            float normalY = contact.normal.y;
+            if (Mathf.Abs(normalY) < 0.5f)
+            {
+                // Touching a new wall face — refresh the corner grace window
+                wallCornerGraceTimer = wallCornerGraceDuration;
+                if (isAttachedToWall)
+                {
+                    // Seamlessly pivot to the new face
+                    currentWallNormal = contact.normal;
+                    isNearWall = true;
+                }
+                break;
+            }
+        }
+    }
+
     void OnCollisionStay(Collision collision)
     {
         if (isGrounded) return;
@@ -533,15 +749,19 @@ public class PlayerController : MonoBehaviour
             {
                 isNearWall = true;
                 currentWallNormal = contact.normal;
+                wallCornerGraceTimer = wallCornerGraceDuration; // keep refreshing while in contact
 
-                Vector3 pushDirection = contact.normal;
-                pushDirection.y = 0;
-                pushDirection.Normalize();
+                if (!isWallJumping)
+                {
+                    Vector3 pushDirection = contact.normal;
+                    pushDirection.y = 0;
+                    pushDirection.Normalize();
 
-                Vector3 velocity = rb.linearVelocity;
-                velocity.x = pushDirection.x * 0.5f;
-                velocity.z = pushDirection.z * 0.5f;
-                rb.linearVelocity = velocity;
+                    Vector3 velocity = rb.linearVelocity;
+                    velocity.x = pushDirection.x * 0.5f;
+                    velocity.z = pushDirection.z * 0.5f;
+                    rb.linearVelocity = velocity;
+                }
 
                 break;
             }
@@ -566,16 +786,31 @@ public class PlayerController : MonoBehaviour
             isChargingMana = true;
 
             currentMana += manaChargeRate * Time.deltaTime;
+
+            // Tick sound every manaChargeTickInterval seconds
+            chargeTickTimer += Time.deltaTime;
+            if (chargeTickTimer >= manaChargeTickInterval)
+            {
+                chargeTickTimer -= manaChargeTickInterval;
+                if (manaChargeTickClip != null && audioSource != null)
+                    audioSource.PlayOneShot(manaChargeTickClip, manaSoundVolume);
+            }
+
             if (currentMana >= maxMana)
             {
                 currentMana = maxMana;
                 isChargingMana = false;
                 canChargeMana = false; // Must release G to charge again
+                chargeTickTimer = 0f;
+
+                if (manaChargeFullClip != null && audioSource != null)
+                    audioSource.PlayOneShot(manaChargeFullClip, manaSoundVolume);
             }
         }
         else
         {
             isChargingMana = false;
+            chargeTickTimer = 0f; // Reset tick so next charge starts fresh
         }
 
         if (isChargingMana || currentMana > 0f)
@@ -737,5 +972,383 @@ public class PlayerController : MonoBehaviour
         // TODO: animator.SetTrigger("HeavyLand");
         // TODO: CameraShake.Instance.Shake(0.3f, 0.15f);
         Debug.Log("[PlayerController] Heavy landing detected – recovery started.");
+    }
+
+    // ── Rope Walking System ──────────────────────────────────────────────────
+
+    public void StartRopeWalking(RopeWalkable rope)
+    {
+        if (isAttachedToWall || IsInDialogue || isRecovering || IsRopeWalking || IsZiplining) return;
+        
+        // Only start rope walking if falling or walking horizontally onto it, not jumping up into it
+        if (rb.linearVelocity.y > 0.1f) return;
+        
+        // Only allow starting the minigame if the player is near one of the anchor points
+        float distToStart = Vector3.Distance(transform.position, rope.startPoint.position);
+        float distToEnd = Vector3.Distance(transform.position, rope.endPoint.position);
+        
+        if (distToStart > maxRopeEntryDistance && distToEnd > maxRopeEntryDistance)
+        {
+            return; // Player is too far from the start or end points (e.g. jumped into the middle)
+        }
+        
+        IsRopeWalking = true;
+        currentRope = rope;
+        
+        Vector3 startPos = rope.startPoint.position;
+        Vector3 endPos = rope.endPoint.position;
+        Vector3 ropeDir = (endPos - startPos).normalized;
+        
+        // Determine the "forward" direction relative to the camera
+        float dotCamera = 1f;
+        if (Camera.main != null)
+        {
+            dotCamera = Vector3.Dot(Camera.main.transform.forward, ropeDir);
+        }
+        currentRopeDir = dotCamera > 0 ? ropeDir : -ropeDir;
+        
+        Vector3 playerToStart = transform.position - startPos;
+        ropeProgress = Mathf.Clamp(Vector3.Dot(playerToStart, ropeDir), 0f, rope.RopeLength);
+        
+        rb.useGravity = false;
+        rb.linearVelocity = Vector3.zero;
+        
+        balanceValue = 0f;
+        balanceVelocity = Random.Range(-10f, 10f); // Initial nudge
+        
+        targetRopeUIAlpha = 1f;
+        
+        if (animator != null)
+        {
+            animator.SetBool("IsWalking", false);
+            animator.SetBool("IsRunning", false);
+        }
+    }
+
+    private void HandleRopeWalking()
+    {
+        if (currentRope == null) 
+        { 
+            EndRopeWalking(); 
+            return; 
+        }
+
+        if (Input.GetKeyDown(KeyCode.Space))
+        {
+            EndRopeWalking();
+            jumpRequested = true;
+            return;
+        }
+
+        Vector3 startPos = currentRope.startPoint.position;
+        Vector3 endPos = currentRope.endPoint.position;
+        Vector3 ropeDir = (endPos - startPos).normalized;
+        float ropeLen = currentRope.RopeLength;
+
+        // 1. Move along rope
+        float vertical = Input.GetAxisRaw("Vertical");
+        float moveSign = Vector3.Dot(currentRopeDir, ropeDir) > 0 ? 1f : -1f;
+        
+        ropeProgress += vertical * moveSign * ropeMoveSpeed * Time.deltaTime;
+        
+        if (ropeProgress < 0f || ropeProgress > ropeLen)
+        {
+            EndRopeWalking();
+            return;
+        }
+
+        Vector3 currentPos = currentRope.GetRopePoint(ropeProgress);
+        transform.position = currentPos;
+        
+        // Face the movement direction along the curve tangent
+        if (Mathf.Abs(vertical) > 0.1f)
+        {
+            float testProgress = ropeProgress + moveSign * 0.1f;
+            // Clamp to ensure we don't go out of bounds for the tangent test
+            testProgress = Mathf.Clamp(testProgress, 0f, ropeLen);
+            
+            Vector3 nextPos = currentRope.GetRopePoint(testProgress);
+            Vector3 tangent = (nextPos - currentPos).normalized;
+            
+            // If the player is at the very edge, the tangent might be zero. Fallback to currentRopeDir.
+            if (tangent == Vector3.zero) tangent = currentRopeDir;
+
+            Vector3 lookDir = vertical > 0 ? tangent : -tangent;
+            if (lookDir != Vector3.zero)
+            {
+                Quaternion lookRot = Quaternion.LookRotation(lookDir);
+                // Tilt the character based on balance value (-100 to 100)
+                float tiltAngle = (balanceValue / 100f) * -ropeMaxTiltAngle; 
+                Quaternion tiltRot = Quaternion.AngleAxis(tiltAngle, Vector3.forward);
+                
+                Quaternion targetRot = lookRot * tiltRot;
+                transform.rotation = Quaternion.Slerp(transform.rotation, targetRot, rotationSpeed * Time.deltaTime);
+            }
+        }
+
+        // 2. Balancing
+        float instability = currentRope.baseInstability * (1f + ropeLen * 0.05f);
+        
+        // Gravity pulls the notch further away from center (Slightly reduced so you don't fight a wall)
+        float gravityPull = balanceValue * instability * 0.2f;
+        
+        // Unpredictable wobble (Reduced so it doesn't pin you)
+        float wobble = (Mathf.PerlinNoise(Time.time * 2f, 0f) * 2f - 1f); // Range -1 to 1
+        gravityPull += wobble * instability * 2f;
+        
+        // Add minimum drift if perfectly centered
+        if (Mathf.Abs(balanceValue) < 5f)
+        {
+            gravityPull += Mathf.Sign(balanceValue != 0 ? balanceValue : Random.Range(-1f, 1f)) * instability;
+        }
+        
+        balanceVelocity += gravityPull * Time.deltaTime;
+
+        // Player inputs A/D to counter (inverted from before)
+        float horizontal = Input.GetAxisRaw("Horizontal");
+        balanceVelocity += horizontal * ropeBalanceControlPower * Time.deltaTime;
+
+        // Friction to prevent infinite velocity (Lowered so the notch can actually build speed)
+        balanceVelocity = Mathf.Lerp(balanceVelocity, 0f, Time.deltaTime * 3f);
+        
+        balanceValue += balanceVelocity * Time.deltaTime;
+
+        // 3. Fall condition
+        if (Mathf.Abs(balanceValue) > 100f)
+        {
+            FallFromRope();
+        }
+    }
+
+    private void EndRopeWalking()
+    {
+        IsRopeWalking = false;
+        currentRope = null;
+        rb.useGravity = true;
+        targetRopeUIAlpha = 0f;
+    }
+
+    private void FallFromRope()
+    {
+        EndRopeWalking();
+        // Give a slight push sideways depending on which way they fell
+        Vector3 fallDir = transform.right * Mathf.Sign(balanceValue);
+        rb.linearVelocity = fallDir * 2f;
+    }
+    
+    // ── Zipline System ───────────────────────────────────────────────────────
+
+    private bool TryStartZipline()
+    {
+        // Check for ropes above the player in a 4 unit radius
+        Collider[] hits = Physics.OverlapSphere(transform.position + Vector3.up * 2f, 4f);
+        RopeWalkable bestRope = null;
+        float closestDist = float.MaxValue;
+        
+        foreach (var hit in hits)
+        {
+            RopeWalkable rw = hit.GetComponent<RopeWalkable>();
+            if (rw != null)
+            {
+                // Must have a noticeable slope to zipline
+                if (Mathf.Abs(rw.startPoint.position.y - rw.endPoint.position.y) < minZiplineSlope) continue;
+                
+                float dist = Vector3.Distance(transform.position, hit.ClosestPoint(transform.position));
+                if (dist < closestDist)
+                {
+                    closestDist = dist;
+                    bestRope = rw;
+                }
+            }
+        }
+        
+        if (bestRope != null)
+        {
+            StartZipline(bestRope);
+            return true;
+        }
+        return false;
+    }
+
+    private void StartZipline(RopeWalkable rope)
+    {
+        IsZiplining = true;
+        currentRope = rope;
+        
+        Vector3 startPos = rope.startPoint.position;
+        Vector3 endPos = rope.endPoint.position;
+        Vector3 ropeDir = (endPos - startPos).normalized;
+        Vector3 playerToStart = transform.position - startPos;
+        ropeProgress = Mathf.Clamp(Vector3.Dot(playerToStart, ropeDir), 0f, rope.RopeLength);
+        
+        rb.useGravity = false;
+        rb.linearVelocity = Vector3.zero;
+        
+        if (animator != null)
+        {
+            animator.SetBool("IsWalking", false);
+            animator.SetBool("IsRunning", false);
+        }
+    }
+
+    private void HandleZiplining()
+    {
+        if (currentRope == null) { EndZiplining(); return; }
+        
+        if (Input.GetKeyDown(KeyCode.Space))
+        {
+            EndZiplining();
+            jumpRequested = true;
+            return;
+        }
+        
+        Vector3 startPos = currentRope.startPoint.position;
+        Vector3 endPos = currentRope.endPoint.position;
+        float ropeLen = currentRope.RopeLength;
+        
+        // Always move from highest to lowest point
+        float moveSign = startPos.y > endPos.y ? 1f : -1f;
+        
+        ropeProgress += moveSign * ziplineSpeed * Time.deltaTime;
+        
+        if (ropeProgress < 0f || ropeProgress > ropeLen)
+        {
+            EndZiplining();
+            return;
+        }
+        
+        // Suspend the player *below* the rope slightly
+        Vector3 currentPos = currentRope.GetRopePoint(ropeProgress);
+        transform.position = currentPos - Vector3.up * ziplineHangOffset;
+        
+        // Face the zipline direction
+        Vector3 ropeDir = (endPos - startPos).normalized;
+        Vector3 lookDir = moveSign > 0 ? ropeDir : -ropeDir;
+        lookDir.y = 0; // Flatten look dir
+        if (lookDir != Vector3.zero)
+        {
+            transform.rotation = Quaternion.Slerp(transform.rotation, Quaternion.LookRotation(lookDir), rotationSpeed * Time.deltaTime);
+        }
+    }
+
+    private void EndZiplining()
+    {
+        IsZiplining = false;
+        currentRope = null;
+        rb.useGravity = true;
+        // Apply slight forward momentum when getting off zipline
+        rb.linearVelocity = transform.forward * ziplineSpeed * 0.5f;
+    }
+
+    private void CreateRopeUI()
+    {
+        if (ropeCanvasGroup != null) return;
+
+        Texture2D whiteTex = Texture2D.whiteTexture;
+        Sprite defaultSprite = Sprite.Create(whiteTex, new Rect(0, 0, whiteTex.width, whiteTex.height), Vector2.zero);
+
+        GameObject canvasObj = new GameObject("RopeCanvas");
+        canvasObj.transform.SetParent(this.transform);
+        canvasObj.transform.localPosition = ropeBarOffset; 
+        
+        Canvas canvas = canvasObj.AddComponent<Canvas>();
+        canvas.renderMode = RenderMode.WorldSpace;
+        RectTransform rt = canvasObj.GetComponent<RectTransform>();
+        rt.sizeDelta = ropeBarSize;
+        rt.localScale = new Vector3(0.5f, 0.5f, 0.5f);
+
+        ropeCanvasGroup = canvasObj.AddComponent<CanvasGroup>();
+        ropeCanvasGroup.alpha = 0f;
+
+        // Bar background
+        GameObject bgObj = new GameObject("RopeBarBg");
+        bgObj.transform.SetParent(canvasObj.transform, false);
+        UnityEngine.UI.Image bgImage = bgObj.AddComponent<UnityEngine.UI.Image>();
+        bgImage.color = ropeBarBgColor;
+        if (ropeBarBgSprite != null)
+        {
+            bgImage.sprite = ropeBarBgSprite;
+            if (ropeBarBgSprite.border != Vector4.zero) bgImage.type = UnityEngine.UI.Image.Type.Sliced;
+        }
+        else
+        {
+            bgImage.sprite = defaultSprite;
+        }
+        RectTransform bgRect = bgObj.GetComponent<RectTransform>();
+        bgRect.anchorMin = Vector2.zero; bgRect.anchorMax = Vector2.one;
+        bgRect.offsetMin = Vector2.zero; bgRect.offsetMax = Vector2.zero;
+
+        // Center Indicator (Target zone)
+        GameObject centerObj = new GameObject("RopeCenter");
+        centerObj.transform.SetParent(canvasObj.transform, false);
+        UnityEngine.UI.Image centerImage = centerObj.AddComponent<UnityEngine.UI.Image>();
+        centerImage.color = ropeCenterColor;
+        if (ropeCenterSprite != null)
+        {
+            centerImage.sprite = ropeCenterSprite;
+            if (ropeCenterSprite.border != Vector4.zero) centerImage.type = UnityEngine.UI.Image.Type.Sliced;
+        }
+        else
+        {
+            centerImage.sprite = defaultSprite;
+        }
+        RectTransform centerRect = centerObj.GetComponent<RectTransform>();
+        centerRect.anchorMin = new Vector2(0.5f, 0f);
+        centerRect.anchorMax = new Vector2(0.5f, 1f);
+        centerRect.sizeDelta = new Vector2(ropeCenterWidth, 0f);
+        centerRect.anchoredPosition = Vector2.zero;
+
+        // Notch
+        GameObject notchObj = new GameObject("RopeNotch");
+        notchObj.transform.SetParent(canvasObj.transform, false);
+        UnityEngine.UI.Image notchImage = notchObj.AddComponent<UnityEngine.UI.Image>();
+        notchImage.color = ropeNotchColorSafe;
+        if (ropeNotchSprite != null)
+        {
+            notchImage.sprite = ropeNotchSprite;
+            if (ropeNotchSprite.border != Vector4.zero) notchImage.type = UnityEngine.UI.Image.Type.Sliced;
+        }
+        else
+        {
+            notchImage.sprite = defaultSprite;
+        }
+        ropeNotch = notchObj.GetComponent<RectTransform>();
+        ropeNotch.anchorMin = new Vector2(0.5f, 0f);
+        ropeNotch.anchorMax = new Vector2(0.5f, 1f);
+        ropeNotch.sizeDelta = new Vector2(ropeNotchWidth, 0f); 
+        ropeNotch.anchoredPosition = Vector2.zero;
+    }
+
+    private void UpdateRopeUI()
+    {
+        if (ropeCanvasGroup != null)
+        {
+            ropeCanvasGroup.alpha = Mathf.MoveTowards(ropeCanvasGroup.alpha, targetRopeUIAlpha, Time.deltaTime * 5f);
+            
+            if (ropeCanvasGroup.alpha > 0f)
+            {
+                // Balance value is -100 to 100.
+                float maxOffset = ropeBarSize.x / 2f;
+                float currentOffset = (balanceValue / 100f) * maxOffset;
+                
+                if (ropeNotch != null)
+                {
+                    ropeNotch.anchoredPosition = new Vector2(currentOffset, 0f);
+                    
+                    // Color shifts to danger color as it gets closer to edges
+                    UnityEngine.UI.Image notchImg = ropeNotch.GetComponent<UnityEngine.UI.Image>();
+                    if (notchImg != null)
+                    {
+                        float danger = Mathf.Abs(balanceValue) / 100f;
+                        notchImg.color = Color.Lerp(ropeNotchColorSafe, ropeNotchColorDanger, danger);
+                    }
+                }
+                
+                if (Camera.main != null)
+                {
+                    ropeCanvasGroup.transform.rotation = Quaternion.LookRotation(ropeCanvasGroup.transform.position - Camera.main.transform.position);
+                }
+            }
+        }
     }
 }

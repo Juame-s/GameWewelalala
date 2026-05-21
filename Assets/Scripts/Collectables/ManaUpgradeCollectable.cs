@@ -17,6 +17,10 @@ public class ManaUpgradeCollectable : MonoBehaviour, IInteractable
     [Tooltip("How much to SUBTRACT from manaClimbDrainRate (units/s). Use 0 to skip.")]
     [SerializeField] private float climbDrainReduction = 3f;
 
+    [Tooltip("How much to ADD to the snow melt radius when charging mana. Use 0 to skip.")]
+    [SerializeField] private float meltRadiusBonus = 1f;
+
+
     [Header("Pickup Settings")]
     [SerializeField] private bool destroyOnCollect = true;
 
@@ -61,8 +65,8 @@ public class ManaUpgradeCollectable : MonoBehaviour, IInteractable
 
         if (player != null)
         {
-            player.ApplyManaUpgrade(chargeRateBonus, runDrainReduction, climbDrainReduction);
-            Debug.Log($"[ManaUpgrade] Applied → ChargeRate+{chargeRateBonus}  RunDrain-{runDrainReduction}  ClimbDrain-{climbDrainReduction}");
+            player.ApplyManaUpgrade(chargeRateBonus, runDrainReduction, climbDrainReduction, meltRadiusBonus);
+            Debug.Log($"[ManaUpgrade] Applied → ChargeRate+{chargeRateBonus}  RunDrain-{runDrainReduction}  ClimbDrain-{climbDrainReduction}  MeltRadius+{meltRadiusBonus}");
         }
         else
         {
