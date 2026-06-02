@@ -45,6 +45,7 @@ public class DialogueManager : MonoBehaviour
         if (Instance != null && Instance != this)
         {
             Destroy(gameObject);
+            return;
         }
         else
         {
@@ -53,6 +54,32 @@ public class DialogueManager : MonoBehaviour
 
         audioSource = gameObject.AddComponent<AudioSource>();
         audioSource.playOnAwake = false;
+
+        // --- FIX UI RAYCAST BLOCKING ---
+        // 1. Prevent the text itself from accidentally covering and blocking the buttons
+        if (dialogueBodyText != null) dialogueBodyText.raycastTarget = false;
+        if (speakerNameText != null) speakerNameText.raycastTarget = false;
+        
+        // 2. Force the dialogue panel to have its own Canvas that renders on top of EVERYTHING
+        Canvas panelCanvas = dialoguePanel.GetComponent<Canvas>();
+        if (panelCanvas == null) panelCanvas = dialoguePanel.AddComponent<Canvas>();
+        panelCanvas.overrideSorting = true;
+        panelCanvas.sortingOrder = 32000; // Ridiculously high to beat all other UI and Physics
+        
+        // 3. Give it a dedicated GraphicRaycaster so it manages its own clicks
+        // and completely ignores 3D/2D GameObjects that might be in the way.
+        GraphicRaycaster gr = dialoguePanel.GetComponent<GraphicRaycaster>();
+        if (gr == null) gr = dialoguePanel.AddComponent<GraphicRaycaster>();
+        gr.blockingObjects = GraphicRaycaster.BlockingObjects.None;
+        gr.ignoreReversedGraphics = true;
+        
+        // 4. Ensure the panel accepts interactions
+        CanvasGroup cg = dialoguePanel.GetComponent<CanvasGroup>();
+        if (cg == null) cg = dialoguePanel.AddComponent<CanvasGroup>();
+        cg.blocksRaycasts = true;
+        cg.interactable = true;
+        // -------------------------------
+
         dialoguePanel.SetActive(false);
     }
 

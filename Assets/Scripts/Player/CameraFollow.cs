@@ -34,8 +34,15 @@ public class CameraFollow : MonoBehaviour
     public float HorizontalAngle => currentHorizontalAngle;
     public float VerticalAngle => currentVerticalAngle;
     
+    private Transform _cinematicTarget;
+    private float _cinematicWeight = 0f;
+    private Coroutine _panCoroutine;
+
     void Start()
     {
+        // Load sensitivity from settings
+        mouseSensitivity = PlayerPrefs.GetFloat("Sensitivity", 3f);
+
         if (target == null)
         {
             GameObject player = GameObject.FindGameObjectWithTag("Player");
@@ -64,6 +71,9 @@ public class CameraFollow : MonoBehaviour
     void LateUpdate()
     {
         if (target == null) return;
+        
+        // Do not update camera logic or lock cursor if the game is paused
+        if (Time.timeScale == 0f) return;
         
         // Handle mouse input for camera rotation
         if (enableMouseRotation && !IsInDialogue)
@@ -104,9 +114,20 @@ public class CameraFollow : MonoBehaviour
         // Smoothly move camera
         transform.position = Vector3.Lerp(transform.position, desiredPosition, smoothSpeed * Time.deltaTime);
         
-        // Look at target
-        Vector3 lookAtPosition = target.position + Vector3.up * lookAtHeight;
-        transform.LookAt(lookAtPosition);
+        // Base Look at target
+        Vector3 baseLookAtPosition = target.position + Vector3.up * lookAtHeight;
+        transform.LookAt(baseLookAtPosition);
+        
+        // Apply cinematic rotation override if active
+        if (_cinematicTarget != null && _cinematicWeight > 0f)
+        {
+            Vector3 dirToTarget = (_cinematicTarget.position - transform.position).normalized;
+            if (dirToTarget != Vector3.zero)
+            {
+                Quaternion cinematicRotation = Quaternion.LookRotation(dirToTarget);
+                transform.rotation = Quaternion.Slerp(transform.rotation, cinematicRotation, _cinematicWeight);
+            }
+        }
     }
     
     /// <summary>
@@ -130,5 +151,62 @@ public class CameraFollow : MonoBehaviour
         
         // No collision, use max distance
         return maxDistance;
+    }
+
+    /// <summary>
+    /// Temporarily changes the camera's target to pan towards a specific point, then returns to the player.
+    /// </summary>
+    public void PanToTemporaryTarget(Transform tempTarget, float duration, float delay = 0f, float panSpeed = 2f)
+    {
+        if (_panCoroutine != null) StopCoroutine(_panCoroutine);
+        _panCoroutine = StartCoroutine(PanRoutine(tempTarget, duration, delay, panSpeed));
+    }
+
+    private System.Collections.IEnumerator PanRoutine(Transform tempTarget, float duration, float delay, float customPanSpeed)
+    {
+        if (delay > 0f)
+            yield return new WaitForSeconds(delay);
+
+        _cinematicTarget = tempTarget;
+        
+        // Disable mouse control while panning so the player can't mess up the view
+        bool wasMouseEnabled = enableMouseRotation;
+        enableMouseRotation = false;
+
+        // Smoothly pan TO the target
+        float t = 0f;
+        while (t < 1f)
+        {
+            t += Time.deltaTime * customPanSpeed;
+            _cinematicWeight = Mathf.SmoothStep(0f, 1f, t);
+            yield return null;
+        }
+        _cinematicWeight = 1f;
+
+        // Hold
+        yield return new WaitForSeconds(duration);
+
+        // Smoothly return TO the player
+        t = 0f;
+        while (t < 1f)
+        {
+            t += Time.deltaTime * customPanSpeed;
+            _cinematicWeight = Mathf.SmoothStep(1f, 0f, t);
+            yield return null;
+        }
+        _cinematicWeight = 0f;
+
+        // Restore controls
+        _cinematicTarget = null;
+        enableMouseRotation = wasMouseEnabled;
+        _panCoroutine = null;
+    }
+
+    /// <summary>
+    /// Called by SettingsMenu when sensitivity changes to immediately update it.
+    /// </summary>
+    public void UpdateSensitivity()
+    {
+        mouseSensitivity = PlayerPrefs.GetFloat("Sensitivity", 3f);
     }
 }

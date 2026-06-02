@@ -4,6 +4,14 @@ using UnityEngine;
 [RequireComponent(typeof(CapsuleCollider))]
 public class PlayerController : MonoBehaviour
 {
+    public static PlayerController Instance { get; private set; }
+
+    private void Awake()
+    {
+        if (Instance == null) Instance = this;
+        else Destroy(gameObject);
+    }
+
     [Header("Movement Settings")]
     [SerializeField] private float moveSpeed = 5f;
     [SerializeField] private float runSpeed = 9f;
@@ -108,6 +116,9 @@ public class PlayerController : MonoBehaviour
     [SerializeField] private float snowInteractionAmount = 5f; // Intensity of melting
     private float bonusSnowMeltRadius = 0f;
 
+    public bool IsChargingMana => isChargingMana;
+    public float CurrentMeltRadius => baseSnowMeltRadius + bonusSnowMeltRadius;
+
 
 
     [Header("Fall System")]
@@ -140,6 +151,8 @@ public class PlayerController : MonoBehaviour
     [SerializeField] private float ropeBalanceControlPower = 1500f; // Increased so the notch moves very fast when commanded
     [SerializeField] private float ropeMaxTiltAngle = 40f;
     [SerializeField] private float maxRopeEntryDistance = 3f;
+    [Tooltip("Vertical offset of the player's root relative to the rope point while rope walking. Positive moves the player up.")]
+    [SerializeField] private float ropeWalkHeightOffset = 0f;
     
     [Header("Ziplining")]
     [SerializeField] private float ziplineSpeed = 20f;
@@ -172,6 +185,7 @@ public class PlayerController : MonoBehaviour
     private UnityEngine.UI.Image manaFill;
     private TrailRenderer runTrail;
     private AudioSource audioSource;
+    private IInteractable currentTargetInteractable;
 
     void Start()
     {
@@ -233,6 +247,8 @@ public class PlayerController : MonoBehaviour
 
     void Update()
     {
+        FindNearestInteractable();
+
         // Tick wall jump mana pause timer
         if (wallJumpManaPauseTimer > 0f)
             wallJumpManaPauseTimer -= Time.deltaTime;
@@ -497,14 +513,42 @@ public class PlayerController : MonoBehaviour
 
     private void TryInteract()
     {
+        if (currentTargetInteractable != null)
+        {
+            currentTargetInteractable.Interact();
+        }
+    }
+
+    private void FindNearestInteractable()
+    {
         Collider[] colliders = Physics.OverlapSphere(transform.position, interactRadius);
+        IInteractable closest = null;
+        float minDist = float.MaxValue;
+        
         foreach (Collider col in colliders)
         {
             IInteractable interactable = col.GetComponent<IInteractable>();
             if (interactable != null)
             {
-                interactable.Interact();
-                break; // Only interact with one object
+                float dist = Vector3.Distance(transform.position, col.transform.position);
+                if (dist < minDist) {
+                    minDist = dist;
+                    closest = interactable;
+                }
+            }
+        }
+
+        if (closest != currentTargetInteractable) {
+            if (currentTargetInteractable is MonoBehaviour oldMb && oldMb != null) {
+                var hl = oldMb.GetComponent<InteractableHighlight>();
+                if (hl) hl.SetHighlight(false);
+            }
+            
+            currentTargetInteractable = closest;
+            
+            if (currentTargetInteractable is MonoBehaviour newMb && newMb != null) {
+                var hl = newMb.GetComponent<InteractableHighlight>();
+                if (hl) hl.SetHighlight(true);
             }
         }
     }
@@ -596,15 +640,49 @@ public class PlayerController : MonoBehaviour
     {
         if (animator == null) return;
 
-        bool isMoving = moveDirection.magnitude > 0.1f;
+        // ── Special states take full priority — zero locomotion speed so blend tree doesn't bleed through
+        bool inSpecialState = isAttachedToWall || IsRopeWalking || IsZiplining;
 
-        animator.SetBool("IsWalking", isMoving && !isRunning);
-        animator.SetBool("IsRunning", isMoving && isRunning);
+        // Locomotion Blend Tree parameter: 0 = Idle, 0.5 = Walk, 1.0 = Run
+        float targetSpeed = 0f;
+        if (!inSpecialState)
+        {
+            bool isMoving = moveDirection.magnitude > 0.1f;
+            if (isMoving) targetSpeed = isRunning ? 1.0f : 0.5f;
+        }
+        float currentSpeed = animator.GetFloat("Speed");
+        animator.SetFloat("Speed", Mathf.MoveTowards(currentSpeed, targetSpeed, Time.deltaTime * 5f));
+
+        // ── Grounded / airborne ────────────────────────────────────────────────
         animator.SetBool("IsGrounded", isGrounded);
         animator.SetFloat("VerticalVelocity", rb.linearVelocity.y);
-        
-        // Optional Zipline pose:
-        // if (IsZiplining) animator.Play("ZiplinePose"); 
+
+        // Only flag falling after the player has actually been airborne & moving downward,
+        // and not while attached to a wall or in a special state.
+        // fallTimer > 0 ensures we skip the brief upward-to-downward flip at the top of a jump.
+        bool isTrulyFalling = !isGrounded
+                              && rb.linearVelocity.y < -0.5f
+                              && !isAttachedToWall
+                              && !IsRopeWalking
+                              && !IsZiplining
+                              && fallTimer > 0.1f;
+        animator.SetBool("IsFalling", isTrulyFalling);
+        animator.SetBool("IsHeavyFalling", isHeavyFalling);
+
+        // ── Climbing ───────────────────────────────────────────────────────────
+        animator.SetBool("IsClimbing", isAttachedToWall);
+        // Signed vertical / horizontal inputs on the wall for a 2D climb blend tree
+        animator.SetFloat("ClimbVertical",   isAttachedToWall ? climbMoveDirection.y   : 0f);
+        animator.SetFloat("ClimbHorizontal", isAttachedToWall ? climbMoveDirection.x   : 0f);
+        // Overall movement magnitude — useful for pausing the animation when still on the wall
+        animator.SetFloat("ClimbSpeed",      isAttachedToWall ? climbMoveDirection.magnitude : 0f);
+
+        // ── Rope Walking ───────────────────────────────────────────────────────
+        animator.SetBool("IsRopeWalking", IsRopeWalking);
+        animator.SetFloat("RopeBalance", balanceValue / 100f);
+
+        // ── Ziplining ──────────────────────────────────────────────────────────
+        animator.SetBool("IsZiplining", IsZiplining);
     }
 
     void FixedUpdate()
@@ -969,7 +1047,7 @@ public class PlayerController : MonoBehaviour
         // Fire the one-shot landing burst
         if (heavyLandParticles != null) heavyLandParticles.Play();
 
-        // TODO: animator.SetTrigger("HeavyLand");
+        if (animator != null) animator.SetTrigger("HeavyLand");
         // TODO: CameraShake.Instance.Shake(0.3f, 0.15f);
         Debug.Log("[PlayerController] Heavy landing detected – recovery started.");
     }
@@ -1058,7 +1136,7 @@ public class PlayerController : MonoBehaviour
         }
 
         Vector3 currentPos = currentRope.GetRopePoint(ropeProgress);
-        transform.position = currentPos;
+        transform.position = currentPos + Vector3.up * ropeWalkHeightOffset;
         
         // Face the movement direction along the curve tangent
         if (Mathf.Abs(vertical) > 0.1f)

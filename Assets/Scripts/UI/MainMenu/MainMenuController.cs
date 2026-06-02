@@ -57,10 +57,10 @@ public class MainMenuController : MonoBehaviour
     //  Inspector — Scenes
     // ─────────────────────────────────────────────────────────────────────────
 
-    [Header("Scene Names")]
-    [SerializeField] private string gameSceneName    = "SampleScene";
-    [SerializeField] private string optionsSceneName = "";  // leave blank to use a panel instead
-    [SerializeField] private string creditsSceneName = "";  // leave blank to use a panel instead
+    [Header("Scenes & Panels")]
+    [SerializeField] private string gameSceneName = "SampleScene";
+    [SerializeField] private GameObject optionsPanel;
+    [SerializeField] private GameObject creditsPanel;
 
     // ─────────────────────────────────────────────────────────────────────────
     //  Private state
@@ -132,6 +132,11 @@ public class MainMenuController : MonoBehaviour
     private void Update()
     {
         if (_isTransitioning) return;
+
+        // Block interaction if panels are active
+        if ((optionsPanel != null && optionsPanel.activeSelf) || 
+            (creditsPanel != null && creditsPanel.activeSelf))
+            return;
 
         // ── Keyboard ─────────────────────────────────────────────────────────
         if (Input.GetKeyDown(KeyCode.LeftArrow))                               CycleLeft();
@@ -277,25 +282,29 @@ public class MainMenuController : MonoBehaviour
                 break;
 
             case "options":
-                if (!string.IsNullOrEmpty(optionsSceneName))
-                    SceneManager.LoadScene(optionsSceneName);
+                if (optionsPanel != null)
+                {
+                    optionsPanel.SetActive(true);
+                }
                 else
                 {
-                    Debug.Log("[MainMenu] Options selected — wire up your options panel here.");
-                    meshes[meshIndex].ResetFromAnimation();
-                    _isTransitioning = false;
+                    Debug.Log("[MainMenu] Options selected — please assign the Options Panel in the inspector.");
                 }
+                meshes[meshIndex].ResetFromAnimation();
+                _isTransitioning = false;
                 break;
 
             case "credits":
-                if (!string.IsNullOrEmpty(creditsSceneName))
-                    SceneManager.LoadScene(creditsSceneName);
+                if (creditsPanel != null)
+                {
+                    creditsPanel.SetActive(true);
+                }
                 else
                 {
-                    Debug.Log("[MainMenu] Credits selected — wire up your credits panel here.");
-                    meshes[meshIndex].ResetFromAnimation();
-                    _isTransitioning = false;
+                    Debug.Log("[MainMenu] Credits selected — please assign the Credits Panel in the inspector.");
                 }
+                meshes[meshIndex].ResetFromAnimation();
+                _isTransitioning = false;
                 break;
 
             case "exit":
@@ -333,5 +342,14 @@ public class MainMenuController : MonoBehaviour
             if (instant)
                 meshes[i].transform.position = pos;
         }
+    }
+
+    /// <summary>
+    /// Closes any open UI panels (Options, Credits). Can be called from UI "Back" buttons.
+    /// </summary>
+    public void ClosePanels()
+    {
+        if (optionsPanel != null) optionsPanel.SetActive(false);
+        if (creditsPanel != null) creditsPanel.SetActive(false);
     }
 }
